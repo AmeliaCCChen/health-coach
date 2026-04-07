@@ -23,7 +23,8 @@
 }
 body{background:var(--bg);color:var(--text);font-family:var(--font-body);font-size:14px;line-height:1.6;min-height:100vh}
 body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");opacity:.4;pointer-events:none;z-index:0}
-.app{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:20px 16px 40px}
+.app{position:relative;z-index:1;max-width:680px;margin:0 auto;padding:20px 16px 0}
+.feed-area{padding-bottom:320px}
 
 /* Header */
 .header{display:flex;align-items:flex-end;justify-content:space-between;padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--border)}
@@ -60,8 +61,8 @@ body::before{content:'';position:fixed;inset:0;background-image:url("data:image/
 .metric-unit{font-size:10px;color:var(--muted);margin-left:1px}
 .metric-empty{font-size:12px;color:var(--border2);font-family:var(--font-body)}
 
-/* Input card */
-.input-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:14px;box-shadow:var(--shadow);transition:border-color .2s}
+/* Input card - fixed bottom */
+.input-card{background:var(--surface);border:1px solid var(--border);border-top-left-radius:var(--radius);border-top-right-radius:var(--radius);border-bottom:none;overflow:hidden;box-shadow:0 -4px 24px rgba(124,92,191,.10);transition:border-color .2s;position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:680px;z-index:100}
 .input-card:focus-within{border-color:var(--accent-mid)}
 .tab-row{display:flex;border-bottom:1px solid var(--border);background:var(--bg2)}
 .tab{flex:1;padding:9px 6px;text-align:center;font-size:12px;color:var(--muted);cursor:pointer;border:none;background:none;font-family:var(--font-body);transition:all .18s;border-bottom:2px solid transparent;margin-bottom:-1px}
@@ -193,12 +194,13 @@ textarea::placeholder{color:var(--border2)}
         <textarea id="textInput" placeholder="早餐吃了地瓜燕麥粥，舌苔略白偏厚，今天有點腰痠..." oninput="updateCount()"></textarea>
       </div>
       <div class="panel" id="panel-photo">
-        <div class="upload-zone">
-          <input type="file" accept="image/*" onchange="handlePhoto(event)">
-          <div class="upload-hint" style="margin-bottom:4px">點擊或拖放上傳</div>
-          <div class="upload-hint"><strong>舌象照片</strong> 或 <strong>Tanita 截圖</strong></div>
-          <img id="previewImg" class="preview-img" style="display:none">
+        <div class="upload-zone" id="photoZone">
+          <input type="file" accept="image/*" multiple onchange="handlePhoto(event)" id="photoInput">
+          <div class="upload-hint" style="margin-bottom:4px">點擊或拖放上傳（可選多張）</div>
+          <div class="upload-hint"><strong>舌象照片</strong>、<strong>Tanita 截圖</strong>等</div>
+          <div id="previewList" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px"></div>
         </div>
+        <textarea id="photoCaption" placeholder="補充說明（選填）：今早舌苔較厚，體重 52.3kg..." style="width:100%;margin-top:8px;background:transparent;border:none;border-top:1px solid var(--border);color:var(--text);font-family:var(--font-body);font-size:13px;resize:none;outline:none;line-height:1.8;min-height:44px;padding:8px 0 0" oninput="updateSendBtn()"></textarea>
       </div>
       <div class="panel" id="panel-garmin">
         <div class="upload-zone">
@@ -221,6 +223,7 @@ textarea::placeholder{color:var(--border2)}
     </div>
   </div>
 
+  <div class="feed-area">
   <div class="feed-header">
     <div class="feed-title">今日記錄</div>
     <button class="btn-report" onclick="generateReport()">產生每日建議</button>
@@ -231,6 +234,7 @@ textarea::placeholder{color:var(--border2)}
       <p>還沒有記錄<br>從隨手記開始，想到什麼就寫下來</p>
     </div>
   </div>
+  </div><!-- end feed-area -->
 </div>
 
 <!-- Settings Modal -->
@@ -482,8 +486,13 @@ ${recent||'（尚無記錄）'}
 /* ── Claude API ── */
 async function callClaude(text, img, ctx){
   const content=[];
-  if(img) content.push({type:'image',source:{type:'base64',media_type:'image/jpeg',data:img}});
-  content.push({type:'text',text:`【記錄類型】${ctx}\n【內容】${text||'請分析上傳的圖片'}`});
+  // 支援複數圖片
+  const photos = S.photoList && S.photoList.length ? S.photoList : (img ? [{data:img,type:'image/jpeg'}] : []);
+  photos.forEach(p=>{ if(p&&p.data) content.push({type:'image',source:{type:'base64',media_type:p.type||'image/jpeg',data:p.data}}); });
+  // 文字說明（caption 優先，否則用 text）
+  const caption = (document.getElementById('photoCaption')?.value||'').trim();
+  const finalText = caption || text || '請分析上傳的圖片';
+  content.push({type:'text',text:`【記錄類型】${ctx}\n【內容】${finalText}`});
   const res = await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{
@@ -536,8 +545,10 @@ async function submitEntry(){
     resolveLoading(lid,reply); extractMetrics(reply);
     await saveLogToGitHub();
   } catch(err){ resolveLoading(lid,'分析失敗：'+err.message); }
-  $('textInput').value=''; S.photoBase64=null;
-  $('previewImg').style.display='none';
+  $('textInput').value=''; S.photoBase64=null; S.photoList=[];
+  if($('previewList')) $('previewList').innerHTML='';
+  if($('photoCaption')) $('photoCaption').value='';
+  if($('photoInput')) $('photoInput').value='';
   $('charCount').textContent='0 字'; $('btnSend').disabled=true;
   persist();
 }
@@ -574,14 +585,28 @@ function switchTab(tab,el){
   el.classList.add('active'); $('panel-'+tab).classList.add('active'); updateSendBtn();
 }
 function updateCount(){ $('charCount').textContent=$('textInput').value.length+' 字'; updateSendBtn(); }
-function updateSendBtn(){ $('btnSend').disabled=!($('textInput').value.trim()||S.photoBase64||S.garminData); }
+function updateSendBtn(){ $('btnSend').disabled=!($('textInput').value.trim()||(S.photoList&&S.photoList.length)||S.garminData); }
 function toggleCtx(el,label){
   el.classList.toggle('on');
   S.activeCtx=el.classList.contains('on')?[...S.activeCtx,label]:S.activeCtx.filter(x=>x!==label);
 }
 function handlePhoto(e){
-  const f=e.target.files[0]; if(!f) return;
-  const r=new FileReader(); r.onload=ev=>{ S.photoBase64=ev.target.result.split(',')[1]; $('previewImg').src=ev.target.result; $('previewImg').style.display='block'; updateSendBtn(); }; r.readAsDataURL(f);
+  const files=Array.from(e.target.files); if(!files.length) return;
+  S.photoList=[]; $('previewList').innerHTML='';
+  let loaded=0;
+  files.forEach((f,i)=>{
+    const r=new FileReader();
+    r.onload=ev=>{
+      S.photoList[i]={data:ev.target.result.split(',')[1],type:f.type||'image/jpeg'};
+      const img=document.createElement('img');
+      img.src=ev.target.result;
+      img.style.cssText='height:70px;border-radius:6px;object-fit:cover;border:1px solid var(--border)';
+      $('previewList').appendChild(img);
+      loaded++;
+      if(loaded===files.length){S.photoBase64=S.photoList[0]?.data||null;updateSendBtn();}
+    };
+    r.readAsDataURL(f);
+  });
 }
 function handleGarmin(e){
   const f=e.target.files[0]; if(!f) return;
