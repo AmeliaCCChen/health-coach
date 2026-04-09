@@ -462,7 +462,7 @@ function buildSystem(){
   const ingredients = S.remoteIngredients || S.ingredients || '（未設定食材庫）';
   const rules = S.remoteRules || S.rules || '（未設定教練規則）';
 
-  return `你是結合中醫理論的個人健康教練，協助使用者提升代謝、降低體脂。
+  return `你是結合中醫理論的個人健康教練。
 
 【今天日期】${today}
 
@@ -478,10 +478,11 @@ ${ingredients}
 【教練規則與輸出格式】
 ${rules}
 
-【今日記錄（最近10筆）】
-${recent||'（尚無記錄）'}
+回應要求：簡潔具體，200字以內，繁體中文。飲食建議務必從食材庫選材。`;
+}
 
-回應要求：簡潔、具體、用繁體中文。飲食建議務必從食材庫選材，不可建議食材庫以外的食物。`;
+function buildContext(){
+  return S.entries.length ? '\n\n【今日完整記錄】\n'+S.entries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n') : '';
 }
 
 /* ── Claude API ── */
@@ -493,7 +494,7 @@ async function callClaude(text, img, ctx){
   // 文字說明（caption 優先，否則用 text）
   const caption = (document.getElementById('photoCaption')?.value||'').trim();
   const finalText = caption || text || '請分析上傳的圖片';
-  content.push({type:'text',text:`【記錄類型】${ctx}\n【內容】${finalText}`});
+  content.push({type:'text',text:`【記錄類型】${ctx}\n【內容】${finalText}${buildContext()}`});
   const res = await fetch('https://api.anthropic.com/v1/messages',{
     method:'POST',
     headers:{
@@ -524,8 +525,8 @@ async function generateReport(){
         'anthropic-version':'2023-06-01',
         'anthropic-dangerous-direct-browser-access':'true'
       },
-      body: JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1200,system:buildSystem(),
-        messages:[{role:'user',content:`今日量測：${metrics||'未記錄'}\n今日所有記錄：\n${entries||'（無記錄）'}\n\n請產生完整每日建議報告，格式如下：\n\n## 今日整體評估\n（根據舌象、體重體脂、Garmin 數據綜合評估）\n\n## 三餐建議\n早餐：（務必從食材庫選材，具體份量）\n午餐：\n晚餐：\n\n## 中藥／食療建議\n（根據今日舌象與症狀，參考目前處方）\n\n## 運動建議\n（結合 Garmin 數據與今日體力狀態）\n\n## 明日注意事項`}]})
+      body: JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1500,system:buildSystem(),
+        messages:[{role:'user',content:`今日量測：${metrics||'未記錄'}\n\n今日完整記錄（包含使用者輸入與教練回應）：\n${entries||'（無記錄）'}\n\n請根據以上完整記錄產生每日總結報告：\n\n## 今日整體評估\n## 三餐建議（從食材庫選材）\n## 中藥／食療建議\n## 運動建議\n## 明日注意事項`}]})
     });
     const d = await res.json();
     const reportText = d.content[0]?.text||'產生失敗';
@@ -557,6 +558,7 @@ async function submitEntry(){
   try{
     const reply=await callClaude(text,S.photoBase64,S.activeCtx.join('、'));
     resolveLoading(lid,reply); extractMetrics(reply);
+    S.entries.push({type:'coach',text:'【教練回應】'+reply,time:timeNow()});
     await saveLogToGitHub();
   } catch(err){ resolveLoading(lid,'分析失敗：'+err.message); }
   $('textInput').value=''; S.photoBase64=null; S.photoList=[];
