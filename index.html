@@ -326,4 +326,366 @@ function init(){
   try{ const s=localStorage.getItem('hc4'); if(s) Object.assign(S, JSON.parse(s)); }catch(e){}
   const today = todayStr();
   if(S.todayDate !== today){ S.entries=[]; S.metrics={}; S.todayDate=today; persist(); }
-  $('dateBadge').innerHTML = new Date().toLocaleDateString('zh-TW',{year:'numeri
+  $('dateBadge').innerHTML = new Date().toLocaleDateString('zh-TW',{year:'numeric',month:'long',day:'numeric'})+'<br>'+['日','一','二','三','四','五','六'][new Date().getDay()];
+  updateSyncBar();
+  updateMemoryBar();
+  renderMetrics();
+  renderFeed();
+  if(S.ghUser && S.ghToken) loadAllFromGitHub();
+  // 網址加 ?setup 或 ?s 可強制開啟設定頁（手機應急用）
+  if(location.search.includes('setup')||location.search.includes('?s')||!S.apiKey) setTimeout(openSettings, 400);
+}
+
+function todayStr(){ const d=new Date(); if(d.getHours()<4) d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); }
+function persist(){ localStorage.setItem('hc4', JSON.stringify(S)); }
+
+/* ── Sync bar ── */
+function updateSyncBar(){
+  const dot=$('syncDot'), lbl=$('syncLabel'), btn=$('btnSync');
+  if(!S.apiKey){ dot.className='sync-dot'; lbl.innerHTML='尚未設定 Claude API 金鑰'; btn.style.display='none'; return; }
+  if(S.ghUser && S.ghToken){
+    dot.className='sync-dot ok';
+    const t=S.lastSync?new Date(S.lastSync).toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}):'—';
+    lbl.innerHTML=`Claude 已連線 &nbsp;·&nbsp; <b>${S.ghUser}/${S.dataRepo}</b> 上次同步 ${t}`;
+    btn.style.display='inline-block';
+  } else {
+    dot.className='sync-dot ok';
+    lbl.innerHTML='Claude 已連線 &nbsp;·&nbsp; 本地儲存（未設定 GitHub）';
+    btn.style.display='none';
+  }
+}
+
+/* ── Memory status bar ── */
+function updateMemoryBar(){
+  setMemTag('memProfile', !!S.remoteProfile);
+  setMemTag('memFormula', !!S.remoteFormula);
+  setMemTag('memIngredients', !!(S.remoteIngredients||S.ingredients));
+  setMemTag('memRules', !!(S.remoteRules||S.rules));
+}
+function setMemTag(id, loaded){
+  const el=$(id);
+  el.className = 'mem-tag ' + (loaded?'loaded':'missing');
+}
+
+/* ── GitHub API ── */
+const GH = 'https://api.github.com';
+function ghH(){ return {'Authorization':'token '+S.ghToken,'Content-Type':'application/json','Accept':'application/vnd.github.v3+json'}; }
+
+async function ghGet(repo, path){
+  const res = await fetch(`${GH}/repos/${S.ghUser}/${repo}/contents/${path}`, {headers:ghH()});
+  if(res.status===404) return null;
+  if(!res.ok) throw new Error('GitHub GET '+res.status);
+  return res.json();
+}
+
+async function ghPut(repo, path, content, sha){
+  const res = await fetch(`${GH}/repos/${S.ghUser}/${repo}/contents/${path}`, {
+    method:'PUT', headers:ghH(),
+    body: JSON.stringify({ message:`health update ${todayStr()}`, content:btoa(unescape(encodeURIComponent(content))), ...(sha&&{sha}) })
+  });
+  if(!res.ok){ const e=await res.json(); throw new Error(e.message||'GitHub PUT failed'); }
+  return res.json();
+}
+
+function ghDecode(file){ return decodeURIComponent(escape(atob(file.content.replace(/\n/g,'')))); }
+
+/* ── Load all memory files from private data repo ── */
+async function loadAllFromGitHub(){
+  if(!S.ghUser||!S.ghToken) return;
+  setSyncing(true);
+  try{
+    // Load today's log
+    const logFile = await ghGet(S.dataRepo, `logs/${todayStr()}.json`);
+    if(logFile){ const d=JSON.parse(ghDecode(logFile)); if(d.entries) S.entries=d.entries; if(d.metrics) S.metrics=d.metrics; }
+
+    // Load memory files in parallel
+    const [profileFile, formulaFile, ingFile, rulesFile] = await Promise.all([
+      ghGet(S.dataRepo, 'memory/profile.md'),
+      ghGet(S.dataRepo, 'tcm/current_formula.md'),
+      ghGet(S.dataRepo, 'memory/ingredients.md'),
+      ghGet(S.dataRepo, 'memory/coach_rules.md'),
+    ]);
+
+    if(profileFile) S.remoteProfile = ghDecode(profileFile);
+    if(formulaFile) S.remoteFormula = ghDecode(formulaFile);
+    if(ingFile) S.remoteIngredients = ghDecode(ingFile);
+    if(rulesFile) S.remoteRules = ghDecode(rulesFile);
+
+    S.lastSync = Date.now();
+    persist(); updateSyncBar(); updateMemoryBar(); renderMetrics(); renderFeed();
+  } catch(e){ console.warn('GitHub load failed:', e); $('syncDot').className='sync-dot err'; }
+  setSyncing(false);
+}
+
+/* ── Save today's log to private data repo ── */
+async function saveLogToGitHub(){
+  if(!S.ghUser||!S.ghToken) return;
+  setSyncing(true);
+  try{
+    const payload = JSON.stringify({date:todayStr(), metrics:S.metrics, entries:S.entries}, null, 2);
+    const existing = await ghGet(S.dataRepo, `logs/${todayStr()}.json`);
+    await ghPut(S.dataRepo, `logs/${todayStr()}.json`, payload, existing?.sha);
+    S.lastSync = Date.now();
+    persist(); updateSyncBar();
+  } catch(e){ $('syncDot').className='sync-dot err'; console.error('Save failed:', e); }
+  setSyncing(false);
+}
+
+/* ── Save memory files to private data repo ── */
+async function saveMemoryToGitHub(){
+  if(!S.ghUser||!S.ghToken) return;
+  try{
+    if(S.ingredients){
+      const f = await ghGet(S.dataRepo, 'memory/ingredients.md');
+      await ghPut(S.dataRepo, 'memory/ingredients.md', S.ingredients, f?.sha);
+    }
+    if(S.rules){
+      const f = await ghGet(S.dataRepo, 'memory/coach_rules.md');
+      await ghPut(S.dataRepo, 'memory/coach_rules.md', S.rules, f?.sha);
+    }
+  } catch(e){ console.warn('Memory save failed:', e); }
+}
+
+function setSyncing(on){
+  $('syncDot').className = on?'sync-dot syncing':(S.ghToken?'sync-dot ok':'sync-dot');
+  $('btnSync').disabled = on;
+}
+async function manualSync(){ await loadAllFromGitHub(); await saveLogToGitHub(); }
+
+/* ── Build system prompt with all memory layers ── */
+function buildSystem(){
+  const today = new Date().toLocaleDateString('zh-TW');
+  const recent = S.entries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n');
+
+  const profile = S.remoteProfile || '（未設定體質檔案，請在 GitHub health-data/memory/profile.md 建立）';
+  const formula = S.remoteFormula || '（未設定當前處方，請在 GitHub health-data/tcm/current_formula.md 建立）';
+  const ingredients = S.remoteIngredients || S.ingredients || '（未設定食材庫）';
+  const rules = S.remoteRules || S.rules || '（未設定教練規則）';
+
+  return `你是結合中醫理論的個人健康教練，協助使用者提升代謝、降低體脂。
+
+【今天日期】${today}
+
+【個人健康檔案】
+${profile}
+
+【目前使用中藥處方】
+${formula}
+
+【食材庫（建議三餐只從此選材）】
+${ingredients}
+
+【教練規則與輸出格式】
+${rules}
+
+【今日記錄（最近10筆）】
+${recent||'（尚無記錄）'}
+
+回應要求：簡潔、具體、用繁體中文。飲食建議務必從食材庫選材，不可建議食材庫以外的食物。`;
+}
+
+/* ── Claude API ── */
+async function callClaude(text, img, ctx){
+  const content=[];
+  // 支援複數圖片
+  const photos = S.photoList && S.photoList.length ? S.photoList : (img ? [{data:img,type:'image/jpeg'}] : []);
+  photos.forEach(p=>{ if(p&&p.data) content.push({type:'image',source:{type:'base64',media_type:p.type||'image/jpeg',data:p.data}}); });
+  // 文字說明（caption 優先，否則用 text）
+  const caption = (document.getElementById('photoCaption')?.value||'').trim();
+  const finalText = caption || text || '請分析上傳的圖片';
+  content.push({type:'text',text:`【記錄類型】${ctx}\n【內容】${finalText}`});
+  const res = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'x-api-key': S.apiKey,
+      'anthropic-version':'2023-06-01',
+      'anthropic-dangerous-direct-browser-access':'true'
+    },
+    body: JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,system:buildSystem(),messages:[{role:'user',content}]})
+  });
+  if(!res.ok){ const e=await res.json(); throw new Error(e.error?.message||'請求失敗'); }
+  const d = await res.json();
+  return d.content[0]?.text||'無回應';
+}
+
+/* ── Daily report ── */
+async function generateReport(){
+  if(!S.apiKey){ openSettings(); return; }
+  const lid = addLoading();
+  const entries = S.entries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n');
+  const metrics = Object.entries(S.metrics).map(([k,v])=>`${k}：${v}`).join('、');
+  try{
+    const res = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key': S.apiKey,
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
+      body: JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1200,system:buildSystem(),
+        messages:[{role:'user',content:`今日量測：${metrics||'未記錄'}\n今日所有記錄：\n${entries||'（無記錄）'}\n\n請產生完整每日建議報告，格式如下：\n\n## 今日整體評估\n（根據舌象、體重體脂、Garmin 數據綜合評估）\n\n## 三餐建議\n早餐：（務必從食材庫選材，具體份量）\n午餐：\n晚餐：\n\n## 中藥／食療建議\n（根據今日舌象與症狀，參考目前處方）\n\n## 運動建議\n（結合 Garmin 數據與今日體力狀態）\n\n## 明日注意事項`}]})
+    });
+    const d = await res.json();
+    const reportText = d.content[0]?.text||'產生失敗';
+    resolveLoading(lid, reportText);
+    await saveLogToGitHub();
+    await saveDailySummaryToGitHub(reportText, metrics);
+  } catch(e){ resolveLoading(lid,'產生失敗：'+e.message); }
+  persist();
+}
+
+/* ── Save daily summary to GitHub ── */
+async function saveDailySummaryToGitHub(reportText, metrics){
+  if(!S.ghUser||!S.ghToken) return;
+  const today = todayStr();
+  const content = `# 每日總結 ${today}\n\n## 量測數據\n${metrics||'未記錄'}\n\n${reportText}`;
+  try{
+    const existing = await ghGet(S.dataRepo, `logs/${today}-summary.md`);
+    await ghPut(S.dataRepo, `logs/${today}-summary.md`, content, existing?.sha);
+  } catch(e){ console.warn('Summary save failed:', e); }
+}
+
+/* ── Submit entry ── */
+async function submitEntry(){
+  const text=$('textInput').value.trim();
+  if(!S.apiKey){ openSettings(); return; }
+  const entry={type:guessType(S.activeCtx.join(''),text),text:text||'（圖片輸入）',time:timeNow(),hasImage:!!S.photoBase64};
+  pushEntry(entry);
+  const lid=addLoading(); $('btnSend').disabled=true;
+  try{
+    const reply=await callClaude(text,S.photoBase64,S.activeCtx.join('、'));
+    resolveLoading(lid,reply); extractMetrics(reply);
+    await saveLogToGitHub();
+  } catch(err){ resolveLoading(lid,'分析失敗：'+err.message); }
+  $('textInput').value=''; S.photoBase64=null; S.photoList=[];
+  if($('previewList')) $('previewList').innerHTML='';
+  if($('photoCaption')) $('photoCaption').value='';
+  if($('photoInput')) $('photoInput').value='';
+  $('charCount').textContent='0 字'; $('btnSend').disabled=true;
+  persist();
+}
+
+/* ── Helpers ── */
+function guessType(ctx,text){
+  if(ctx.includes('舌')||text.includes('舌')) return 'tongue';
+  if(ctx.includes('運動')||text.includes('跑')||text.includes('走')) return 'garmin';
+  if(ctx.includes('早晨')||text.includes('體重')||text.includes('體脂')) return 'body';
+  return 'diet';
+}
+function extractMetrics(text){
+  const w=text.match(/體重[：:]\s*([\d.]+)/),f=text.match(/體脂[：:]\s*([\d.]+)/),
+        sl=text.match(/睡眠[：:]\s*([\d.]+)/),st=text.match(/步數[：:]\s*([\d,]+)/);
+  if(w) S.metrics.weight=w[1]; if(f) S.metrics.fat=f[1];
+  if(sl) S.metrics.sleep=sl[1]; if(st) S.metrics.steps=st[1].replace(',','');
+  renderMetrics();
+}
+function timeNow(){ return new Date().toLocaleTimeString('zh-TW',{hour:'2-digit',minute:'2-digit'}); }
+function renderMetrics(){
+  const m=S.metrics;
+  $('mWeight').innerHTML=m.weight?`<span class="metric-val">${m.weight}<span class="metric-unit">kg</span></span>`:'<span class="metric-empty">記錄</span>';
+  $('mFat').innerHTML=m.fat?`<span class="metric-val">${m.fat}<span class="metric-unit">%</span></span>`:'<span class="metric-empty">記錄</span>';
+  $('mSleep').innerHTML=m.sleep?`<span class="metric-val">${m.sleep}</span>`:'<span class="metric-empty">記錄</span>';
+  $('mSteps').innerHTML=m.steps?`<span class="metric-val" style="font-size:15px">${m.steps}</span>`:'<span class="metric-empty">記錄</span>';
+}
+function renderFeed(){
+  if(!S.entries.length) return;
+  $('feed').innerHTML=''; S.entries.forEach(e=>$('feed').appendChild(makeEntryEl(e)));
+}
+function switchTab(tab,el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  el.classList.add('active'); $('panel-'+tab).classList.add('active'); updateSendBtn();
+}
+function updateCount(){ $('charCount').textContent=$('textInput').value.length+' 字'; updateSendBtn(); }
+function updateSendBtn(){ $('btnSend').disabled=!($('textInput').value.trim()||(S.photoList&&S.photoList.length)||S.garminData); }
+function toggleCtx(el,label){
+  el.classList.toggle('on');
+  S.activeCtx=el.classList.contains('on')?[...S.activeCtx,label]:S.activeCtx.filter(x=>x!==label);
+}
+function handlePhoto(e){
+  const files=Array.from(e.target.files); if(!files.length) return;
+  S.photoList=[]; $('previewList').innerHTML='';
+  let loaded=0;
+  files.forEach((f,i)=>{
+    const r=new FileReader();
+    r.onload=ev=>{
+      S.photoList[i]={data:ev.target.result.split(',')[1],type:f.type||'image/jpeg'};
+      const img=document.createElement('img');
+      img.src=ev.target.result;
+      img.style.cssText='height:70px;border-radius:6px;object-fit:cover;border:1px solid var(--border)';
+      $('previewList').appendChild(img);
+      loaded++;
+      if(loaded===files.length){S.photoBase64=S.photoList[0]?.data||null;updateSendBtn();}
+    };
+    r.readAsDataURL(f);
+  });
+}
+function handleGarmin(e){
+  const f=e.target.files[0]; if(!f) return;
+  const r=new FileReader(); r.onload=ev=>{ S.garminData=ev.target.result; updateSendBtn(); pushEntry({type:'garmin',text:'Garmin：'+f.name,time:timeNow()}); }; r.readAsText(f);
+}
+function pushEntry(entry){
+  const feed=$('feed'); const empty=feed.querySelector('.empty-feed'); if(empty) empty.remove();
+  S.entries.push(entry); const el=makeEntryEl(entry); feed.appendChild(el); el.scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+function makeEntryEl(entry){
+  const div=document.createElement('div'); div.className='entry';
+  const tc={diet:'tag-diet',body:'tag-body',tongue:'tag-tongue',garmin:'tag-garmin'}[entry.type]||'tag-diet';
+  const tl={diet:'飲食',body:'身體量測',tongue:'舌象',garmin:'Garmin'}[entry.type]||'記錄';
+  div.innerHTML=`<div class="entry-meta"><span class="entry-tag ${tc}">${tl}</span><span class="entry-time">${entry.time}</span></div><div class="entry-text">${entry.text}</div>`; return div;
+}
+function addLoading(){
+  const id='ai'+Date.now(); const div=document.createElement('div'); div.className='ai-card'; div.id=id;
+  div.innerHTML=`<div class="ai-label">分析中</div><div class="ai-loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+  $('feed').appendChild(div); div.scrollIntoView({behavior:'smooth',block:'nearest'}); return id;
+}
+function resolveLoading(id,text){ const div=$(id); if(!div) return; div.innerHTML=`<div class="ai-label">健康教練</div><div class="ai-text">${text}</div>`; }
+
+/* ── Settings ── */
+function openSettings(){
+  try{
+    $('cfgApiKey').value=S.apiKey||''; $('cfgIngredients').value=S.ingredients||''; $('cfgRules').value=S.rules||'';
+    $('cfgGhUser').value=S.ghUser||''; $('cfgAppRepo').value=S.appRepo||'health-coach'; $('cfgDataRepo').value=S.dataRepo||'health-data'; $('cfgGhToken').value=S.ghToken||'';
+    const el=$('ghStatus');
+    if(S.ghUser&&S.ghToken){ el.className='status-pill pill-ok'; el.textContent=`已設定：${S.ghUser} · App:${S.appRepo} · 資料:${S.dataRepo}`; }
+    else { el.className='status-pill pill-none'; el.textContent='未設定'; }
+    $('settingsModal').style.display='flex';
+  } catch(e){ alert('開啟設定失敗：'+e.message); }
+}
+function closeSettings(){ $('settingsModal').style.display='none'; }
+async function saveSettings(){
+  S.apiKey=$('cfgApiKey').value.trim();
+  S.ingredients=$('cfgIngredients').value.trim();
+  S.rules=$('cfgRules').value.trim();
+  S.ghUser=$('cfgGhUser').value.trim();
+  S.appRepo=$('cfgAppRepo').value.trim()||'health-coach';
+  S.dataRepo=$('cfgDataRepo').value.trim()||'health-data';
+  S.ghToken=$('cfgGhToken').value.trim();
+  persist(); updateSyncBar(); closeSettings();
+  if(S.ghUser&&S.ghToken){
+    await loadAllFromGitHub();
+    await saveMemoryToGitHub();
+  }
+}
+
+/* ── Quick input ── */
+function openQuick(field){
+  quickField=field; $('quickTitle').textContent='快速記錄：'+field; $('quickLabel').textContent=field;
+  $('quickVal').placeholder={體重:'65.3（kg）',體脂:'22.5（%）',睡眠:'7.5（小時）',步數:'8420'}[field]||'';
+  $('quickVal').value=''; $('quickModal').style.display='flex'; setTimeout(()=>$('quickVal').focus(),80);
+}
+function closeQuick(){ $('quickModal').style.display='none'; }
+async function saveQuick(){
+  const val=$('quickVal').value.trim(); if(!val) return;
+  const key={體重:'weight',體脂:'fat',睡眠:'sleep',步數:'steps'}[quickField];
+  if(key) S.metrics[key]=val;
+  renderMetrics(); pushEntry({type:'body',text:`${quickField}：${val}`,time:timeNow()});
+  persist(); await saveLogToGitHub(); closeQuick();
+}
+
+init();
+</script>
+</body>
+</html>
