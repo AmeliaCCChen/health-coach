@@ -482,7 +482,8 @@ ${rules}
 }
 
 function buildContext(){
-  return S.entries.length ? '\n\n【今日完整記錄】\n'+S.entries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n') : '';
+  const userEntries = S.entries.filter(e=>e.type!=='coach');
+  return userEntries.length ? '\n\n【今日記錄】\n'+userEntries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n') : '';
 }
 
 /* ── Claude API ── */
@@ -514,7 +515,7 @@ async function callClaude(text, img, ctx){
 async function generateReport(){
   if(!S.apiKey){ openSettings(); return; }
   const lid = addLoading();
-  const entries = S.entries.map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n');
+  const entries = S.entries.filter(e=>e.type!=='coach').map(e=>`[${e.time}][${e.type}] ${e.text}`).join('\n');
   const metrics = Object.entries(S.metrics).map(([k,v])=>`${k}：${v}`).join('、');
   try{
     const res = await fetch('https://api.anthropic.com/v1/messages',{
@@ -572,7 +573,7 @@ async function submitEntry(){
 /* ── Helpers ── */
 function guessType(ctx,text){
   if(ctx.includes('舌')||text.includes('舌')) return 'tongue';
-  if(ctx.includes('運動')||text.includes('跑')||text.includes('走')) return 'garmin';
+  if(S.garminData&&(ctx.includes('運動')||text.includes('跑')||text.includes('走'))) return 'garmin';
   if(ctx.includes('早晨')||text.includes('體重')||text.includes('體脂')) return 'body';
   return 'diet';
 }
